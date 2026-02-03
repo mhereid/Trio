@@ -1,0 +1,98 @@
+name: 5. Sync Keep-Pod-Alive Branch
+run-name: Sync Keep-Pod-Alive with upstream dev
+
+on:
+  workflow_dispatch:  # Manual trigger
+  schedule:
+    # Run every Sunday at 07:00 UTC (before the build workflow)
+    - cron: "0 7 * * 0"
+
+env:
+  GH_PAT: ${{ secrets.GH_PAT }}
+  UPSTREAM_REPO: nightscout/Trio
+  FEATURE_BRANCH: Keep-Pod-Alive
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Validate GH_PAT
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "::error::GH_PAT secret is not set"
+            exit 1
+          fi
+          echo "GH_PAT is configured"
+
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+          ref: ${{ env.FEATURE_BRANCH }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
+          git fetch upstream dev
+
+      - name: Check for new commits
+        id: check
+        run: |
+          UPSTREAM_COMMITS=$(git rev-list HEAD..upstream/dev --count)
+          echo "upstream_commits=$UPSTREAM_COMMITS" >> $GITHUB_OUTPUT
+          if [ "$UPSTREAM_COMMITS" -gt 0 ]; then
+            echo "Found $UPSTREAM_COMMITS new commits from upstream/dev"
+            echo "has_updates=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new commits from upstream/dev"
+            echo "has_updates=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Merge upstream dev
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          echo "Merging upstream/dev into ${{ env.FEATURE_BRANCH }}..."
+          git merge upstream/dev -m "Merge upstream dev into ${{ env.FEATURE_BRANCH }}"
+
+      - name: Update submodules
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git submodule update --init --recursive
+
+      - name: Push changes
+        if: steps.check.outputs.has_updates == 'true'
+        run: |
+          git push origin ${{ env.FEATURE_BRANCH }}
+          echo "### Sync Complete" >> $GITHUB_STEP_SUMMARY
+          echo "Merged ${{ steps.check.outputs.upstream_commits }} commits from upstream/dev into ${{ env.FEATURE_BRANCH }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: No updates needed
+        if: steps.check.outputs.has_updates == 'false'
+        run: |
+          echo "### No Updates" >> $GITHUB_STEP_SUMMARY
+          echo "${{ env.FEATURE_BRANCH }} is already up to date with upstream/dev" >> $GITHUB_STEP_SUMMARY
+
+  # Trigger build after successful sync
+  trigger_build:
+    needs: sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Build Workflow
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/build_trio.yml/dispatches \
+            -d '{"ref":"Keep-Pod-Alive"}'
+          echo "### Build Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "Triggered build workflow for Keep-Pod-Alive branch" >> $GITHUB_STEP_SUMMARY
